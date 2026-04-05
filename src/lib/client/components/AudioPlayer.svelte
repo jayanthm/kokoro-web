@@ -21,7 +21,7 @@
   let autoPlayAttemptedForUrl = $state("");
 
   const canSeek = $derived(Boolean(audioElement && audioElement.seekable.length > 0));
-  const canPlay = $derived(Boolean(audioUrl && isReady && !isStartingPlayback));
+  const canPlay = $derived(Boolean(audioUrl && !isStartingPlayback));
 
   $effect(() => {
     if (audioUrl === lastAudioUrl) return;
@@ -73,6 +73,11 @@
   };
 
   const onAudioError = () => {
+    if (streamStatus === "streaming") {
+      syncStateFromAudio();
+      return;
+    }
+
     playbackError = "Unable to play this audio stream. Try replaying or generating again.";
     isPlaying = false;
     isStartingPlayback = false;
@@ -85,7 +90,7 @@
   }
 
   async function tryPlay(silent = false) {
-    if (!audioElement || !audioUrl || !isReady) return;
+    if (!audioElement || !audioUrl) return;
 
     isStartingPlayback = true;
     try {
