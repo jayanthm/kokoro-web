@@ -129,6 +129,13 @@ function createBlobFallbackPlayer({
 }: CreateStreamingAudioPlayerOptions & { mimeType: string }): StreamingAudioPlayer {
   let disposed = false;
   let activeObjectUrl = "";
+  const AudioContextCtor =
+    typeof window !== "undefined"
+      ? window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      : undefined;
+  const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
+  let nextStartTime = 0;
+  const activeSources = new Set<AudioBufferSourceNode>();
 
   const removeObjectUrl = () => {
     if (activeObjectUrl) {
@@ -139,6 +146,34 @@ function createBlobFallbackPlayer({
 
   const abort = () => {
     reader.cancel("Audio stream aborted").catch(() => undefined);
+    for (const source of activeSources) {
+      source.stop();
+    }
+    activeSources.clear();
+  };
+
+  const queueChunkPlayback = async (value: Uint8Array) => {
+    if (!audioContext || signal?.aborted) return;
+
+    try {
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+      const decoded = await audioContext.decodeAudioData(value.slice().buffer);
+      const source = audioContext.createBufferSource();
+      source.buffer = decoded;
+      source.connect(audioContext.destination);
+      const startAt = Math.max(nextStartTime, audioContext.currentTime + 0.01);
+      source.start(startAt);
+      nextStartTime = startAt + decoded.duration;
+      activeSources.add(source);
+      source.onended = () => {
+        source.disconnect();
+        activeSources.delete(source);
+      };
+    } catch {
+      // Ignore playback decode/scheduling errors in fallback mode.
+    }
   };
 
   const done = (async () => {
@@ -153,7 +188,10 @@ function createBlobFallbackPlayer({
 
         const { done, value } = await reader.read();
         if (done) break;
-        if (value && value.byteLength > 0) chunks.push(value);
+        if (value && value.byteLength > 0) {
+          chunks.push(value);
+          void queueChunkPlayback(value);
+        }
       }
 
       const resBlob = new Blob(chunks, { type: mimeType });
@@ -177,6 +215,9 @@ function createBlobFallbackPlayer({
       disposed = true;
       signal?.removeEventListener("abort", abort);
       abort();
+      if (audioContext && audioContext.state !== "closed") {
+        void audioContext.close();
+      }
       removeObjectUrl();
     },
   };

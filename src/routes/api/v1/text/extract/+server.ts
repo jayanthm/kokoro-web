@@ -18,10 +18,26 @@ const schema = zod.object({
   chapter: zod.number().int().positive().optional(),
 });
 
+function normalizeAllowedHost(rawHost: string) {
+  const trimmed = rawHost.trim().toLowerCase();
+  if (!trimmed) return "";
+
+  const noWildcard = trimmed.startsWith("*.") ? trimmed.slice(2) : trimmed;
+
+  // Support both plain hostnames ("example.com") and full URL entries
+  // ("https://example.com/path") in allowlists.
+  const candidate = noWildcard.includes("://") ? noWildcard : `https://${noWildcard}`;
+  try {
+    return new URL(candidate).hostname.toLowerCase();
+  } catch {
+    return noWildcard.split("/")[0]?.split(":")[0] ?? "";
+  }
+}
+
 function parseAllowedHosts() {
   return (env.KW_ALLOWED_SOURCE_HOSTS ?? "")
     .split(",")
-    .map((host) => host.trim().toLowerCase())
+    .map((host) => normalizeAllowedHost(host))
     .filter(Boolean);
 }
 
