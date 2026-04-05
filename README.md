@@ -68,6 +68,26 @@ You can adjust the `compose.yaml` according to your needs or use docker run dire
 
 Then access the web UI at http://localhost:3000 and the API at http://localhost:3000/api/v1/index.html
 
+### Option 3: Local development on macOS (Docker)
+
+A development-focused `Dockerfile` and helper script are included so you can iterate locally without installing project dependencies directly on your Mac.
+
+```bash
+# Start local dev server at http://localhost:5173
+./scripts/dev-test-deploy.sh dev
+
+# Run tests in a clean container
+./scripts/dev-test-deploy.sh test
+
+# Build production image (latest tag by default)
+./scripts/dev-test-deploy.sh deploy
+
+# Build and run production image on http://localhost:3000
+./scripts/dev-test-deploy.sh deploy-run
+```
+
+You can customize the local dev port with `PORT`, for example: `PORT=4173 ./scripts/dev-test-deploy.sh dev`.
+
 ## ⚙️ Environment variables
 
 - **KW_SECRET_API_KEY** - Your API key for authentication. If left blank, authentication will not be activated
