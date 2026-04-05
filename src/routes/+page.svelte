@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { detectWebGPU } from "$lib/client/utils";
   import { langs, models } from "$lib/shared/resources";
   import SelectControl from "$lib/client/components/SelectControl.svelte";
@@ -13,7 +13,7 @@
   import ExecutionPlacePicker from "./ExecutionPlacePicker.svelte";
   import VersionChecker from "./VersionChecker.svelte";
   import { profile } from "./store.svelte";
-  import { generate } from "./generate";
+  import { generate, type GenerationHandle } from "./generate";
 
   let webgpuSupported = $state(false);
   onMount(() => {
@@ -22,13 +22,23 @@
 
   let loading = $state(false);
   let voiceUrl = $state("");
+  let generationHandle: GenerationHandle | null = $state(null);
+
+  onDestroy(() => {
+    generationHandle?.dispose();
+  });
+
   const process = async () => {
     if (loading) return;
     if (!profile.text) return;
 
     loading = true;
     try {
-      voiceUrl = await generate(profile);
+      generationHandle?.dispose();
+      generationHandle = await generate(profile);
+      voiceUrl = generationHandle.audioUrl;
+      await generationHandle.done;
+      voiceUrl = generationHandle.audioUrl;
       toaster.success("Audio generated successfully");
     } catch (error) {
       console.error(error);
