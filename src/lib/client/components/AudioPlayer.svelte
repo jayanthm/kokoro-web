@@ -102,6 +102,9 @@
     waveSurfer.on("ready", (newTotalDuration) => {
       isReady = true;
       totalDuration = secondsToMinutes(newTotalDuration);
+      if (streamStatus === "streaming") {
+        waveSurfer?.play();
+      }
     });
 
     waveSurfer.on("timeupdate", (newCurrentTime) => {
@@ -136,7 +139,7 @@
         <button
           class="btn btn-ghost btn-circle"
           onclick={playOrPause}
-          disabled={!isReady || streamStatus === "streaming"}
+          disabled={!isReady}
         >
           {#if isPlaying}
             <span in:fade class="tooltip tooltip-right" data-tip="Pause">
