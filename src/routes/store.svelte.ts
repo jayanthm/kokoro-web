@@ -2,7 +2,6 @@ import { browser } from "$app/environment";
 import { detectWebGPU } from "$lib/client/utils";
 import {
   getRandomQuote,
-  modelsMap,
   voicesMap,
   type LangId,
   type ModelId,
@@ -31,10 +30,10 @@ function getCurrentHost() {
 export const defaultProfile: ProfileData = {
   name: "default",
   text: getRandomQuote(),
-  lang: voicesMap["af_alloy"].lang.id,
+  lang: voicesMap["af_heart"].lang.id,
   voiceMode: "simple",
-  voiceFormula: voicesMap["af_alloy"].id,
-  model: modelsMap.model.id,
+  voiceFormula: "af_heart",
+  model: "model",
   speed: 1,
   format: "mp3",
   acceleration: detectWebGPU() ? "webgpu" : "cpu",

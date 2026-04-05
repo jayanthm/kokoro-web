@@ -1,15 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { detectWebGPU } from "$lib/client/utils";
-  import { langs, models } from "$lib/shared/resources";
   import SelectControl from "$lib/client/components/SelectControl.svelte";
   import TextareaControl from "$lib/client/components/TextareaControl.svelte";
   import RangeControl from "$lib/client/components/RangeControl.svelte";
   import AudioPlayer from "$lib/client/components/AudioPlayer.svelte";
   import { toaster } from "$lib/client/toaster";
-  import VoicePicker from "./VoicePicker.svelte";
   import GenerateButton from "./GenerateButton.svelte";
-  import ProfileManager from "./ProfileManager.svelte";
   import ExecutionPlacePicker from "./ExecutionPlacePicker.svelte";
   import VersionChecker from "./VersionChecker.svelte";
   import { profile } from "./store.svelte";
@@ -33,6 +30,7 @@
     if (!profile.text) return;
 
     loading = true;
+    voiceUrl = "";
     try {
       generationHandle?.dispose();
       generationHandle = await generate(profile);
@@ -54,8 +52,7 @@
 
   <h2 class="text-xl font-bold">Input</h2>
 
-  <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-    <ProfileManager />
+  <div class="grid grid-cols-1 gap-4 md:grid-cols-1">
     <ExecutionPlacePicker />
 
     <SelectControl
@@ -74,29 +71,6 @@
       {/if}
     </SelectControl>
 
-    <SelectControl
-      bind:value={profile.model}
-      title="Model quantization"
-      selectClass="w-full"
-    >
-      {#each models as mo}
-        <option value={mo.id}>
-          {mo.size} - {mo.id} ({mo.quantization})
-        </option>
-      {/each}
-    </SelectControl>
-
-    <SelectControl
-      bind:value={profile.lang}
-      title="Language accent (region)"
-      selectClass="w-full"
-    >
-      {#each langs as lng}
-        <option value={lng.id}>{lng.name}</option>
-      {/each}
-    </SelectControl>
-
-    <VoicePicker />
   </div>
 
   <TextareaControl
@@ -120,10 +94,14 @@
     <GenerateButton {loading} onclick={() => process()} />
   </div>
 
-  {#if voiceUrl !== ""}
+  {#if loading || voiceUrl !== ""}
     <div class="space-y-4 pt-2">
       <h2 class="text-xl font-bold">Output</h2>
-      <AudioPlayer audioUrl={voiceUrl} showSpectrogram={true} />
+      <AudioPlayer
+        audioUrl={voiceUrl}
+        showSpectrogram={true}
+        streamStatus={loading ? "streaming" : "finalized"}
+      />
     </div>
   {/if}
 </div>

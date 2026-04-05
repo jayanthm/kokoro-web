@@ -8,8 +8,9 @@
   interface Props {
     audioUrl: string;
     showSpectrogram: boolean;
+    streamStatus?: "idle" | "streaming" | "finalized";
   }
-  let { audioUrl, showSpectrogram }: Props = $props();
+  let { audioUrl, showSpectrogram, streamStatus = "idle" }: Props = $props();
 
   let waveSurfer: WaveSurfer | null = $state(null);
   let waveformContainer: HTMLDivElement | null = $state(null);
@@ -17,6 +18,7 @@
   let isPlaying = $state(false);
   let totalDuration = $state("0:00");
   let currentTime = $state("0:00");
+  let isReady = $state(false);
 
   // Re-render when the audio URL changes, but not when the last URL is the same
   let lastAudioUrl = $state("");
@@ -32,6 +34,7 @@
     isPlaying = false;
     totalDuration = "0:00";
     currentTime = "0:00";
+    isReady = false;
 
     // Destroy the previous instance and reset elements
     if (waveSurfer !== null) {
@@ -97,6 +100,7 @@
     });
 
     waveSurfer.on("ready", (newTotalDuration) => {
+      isReady = true;
       totalDuration = secondsToMinutes(newTotalDuration);
     });
 
@@ -113,6 +117,7 @@
 
   function playOrPause() {
     if (!waveSurfer) return;
+    if (!isReady) return;
 
     if (isPlaying) {
       waveSurfer.pause();
@@ -128,7 +133,11 @@
   <div class="p-2">
     <div class="flex w-full items-center justify-between">
       <div class="flex items-center justify-start space-x-2">
-        <button class="btn btn-ghost btn-circle" onclick={playOrPause}>
+        <button
+          class="btn btn-ghost btn-circle"
+          onclick={playOrPause}
+          disabled={!isReady || streamStatus === "streaming"}
+        >
           {#if isPlaying}
             <span in:fade class="tooltip tooltip-right" data-tip="Pause">
               <Pause class="size-6" />
@@ -140,10 +149,21 @@
           {/if}
         </button>
         <span>{currentTime} - {totalDuration}</span>
+        {#if streamStatus === "streaming"}
+          <span class="badge badge-info badge-soft">Streaming...</span>
+        {:else if !isReady}
+          <span class="badge badge-neutral badge-soft">Buffering...</span>
+        {/if}
       </div>
 
       <div class="flex items-center justify-end space-x-2">
-        <a href={audioUrl} download class="btn btn-ghost btn-circle">
+        <a
+          href={audioUrl}
+          download
+          class="btn btn-ghost btn-circle"
+          class:btn-disabled={streamStatus !== "finalized" || !audioUrl || !isReady}
+          aria-disabled={streamStatus !== "finalized" || !audioUrl || !isReady}
+        >
           <span class="tooltip tooltip-left" data-tip="Download">
             <Download class="size-6" />
           </span>
