@@ -7,7 +7,6 @@
   import AudioPlayer from "$lib/client/components/AudioPlayer.svelte";
   import { toaster } from "$lib/client/toaster";
   import GenerateButton from "./GenerateButton.svelte";
-  import ExecutionPlacePicker from "./ExecutionPlacePicker.svelte";
   import VersionChecker from "./VersionChecker.svelte";
   import { profile } from "./store.svelte";
   import { generate, type GenerationHandle } from "./generate";
@@ -97,14 +96,29 @@
   <h2 class="text-xl font-bold">Input</h2>
 
   <div class="grid grid-cols-1 gap-4 md:grid-cols-1">
-    <ExecutionPlacePicker />
+    <fieldset class="fieldset w-full">
+      <legend class="fieldset-legend">Generation mode</legend>
+      <select class="select w-full" bind:value={profile.generationMode}>
+        <option value="streaming">Streaming (progressive playback)</option>
+        <option value="normal">Normal (single final file)</option>
+      </select>
+      <span class="fieldset-label">
+        Browser mode is always used. Choose streaming for chunked playback or
+        normal to wait for the final audio.
+      </span>
+    </fieldset>
+
+    <fieldset class="fieldset w-full">
+      <legend class="fieldset-legend">Input source</legend>
+      <select class="select w-full" bind:value={profile.inputSource}>
+        <option value="text">Custom text</option>
+        <option value="url">Load from URL</option>
+      </select>
+    </fieldset>
 
     <SelectControl
       bind:value={profile.acceleration}
-      disabled={profile.executionPlace === "api"}
-      title={profile.executionPlace === "browser"
-        ? "Acceleration"
-        : "Acceleration (Browser only)"}
+      title="Acceleration"
       selectClass="w-full"
     >
       <option value="cpu">CPU</option>
@@ -116,29 +130,31 @@
     </SelectControl>
   </div>
 
-  <div class="space-y-2 rounded-md border border-base-300 p-3">
-    <h3 class="font-semibold">Load from URL</h3>
-    <div class="grid grid-cols-1 gap-2 md:grid-cols-[1fr_160px_auto]">
-      <input
-        class="input input-bordered w-full"
-        placeholder="https://example.com/chapter-123"
-        bind:value={sourceUrl}
-      />
-      <input
-        class="input input-bordered w-full"
-        placeholder="Chapter (optional)"
-        inputmode="numeric"
-        bind:value={sourceChapter}
-      />
-      <button
-        class="btn btn-outline"
-        onclick={() => loadFromUrl()}
-        disabled={loadingFromUrl}
-      >
-        {loadingFromUrl ? "Loading..." : "Load from URL"}
-      </button>
+  {#if profile.inputSource === "url"}
+    <div class="space-y-2 rounded-md border border-base-300 p-3">
+      <h3 class="font-semibold">Load from URL</h3>
+      <div class="grid grid-cols-1 gap-2 md:grid-cols-[1fr_160px_auto]">
+        <input
+          class="input input-bordered w-full"
+          placeholder="https://example.com/chapter-123"
+          bind:value={sourceUrl}
+        />
+        <input
+          class="input input-bordered w-full"
+          placeholder="Chapter (optional)"
+          inputmode="numeric"
+          bind:value={sourceChapter}
+        />
+        <button
+          class="btn btn-outline"
+          onclick={() => loadFromUrl()}
+          disabled={loadingFromUrl}
+        >
+          {loadingFromUrl ? "Loading..." : "Load from URL"}
+        </button>
+      </div>
     </div>
-  </div>
+  {/if}
 
   <TextareaControl
     bind:value={profile.text}

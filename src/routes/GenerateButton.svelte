@@ -25,7 +25,7 @@
       "items-center justify-center space-x-2 px-4 py-2 text-xl": true,
     }}
   >
-    <span>{loading ? "Streaming..." : "Start Speaking"}</span>
+    <span>{loading ? "Generating..." : "Start Speaking"}</span>
     {#if loading}
       <Loader class="size-5 animate-spin" />
     {:else}
