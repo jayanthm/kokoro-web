@@ -5,13 +5,16 @@
   "scripts": {
     "build": "rm -rf ./build && npm run openapigen && vite build",
     "build:static": "ADAPTER=static npm run build",
-    "dev": "npm run openapigen && vite dev --host 0.0.0.0",
-    "preview": "npm run openapigen && vite preview",
-    "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "openapigen": "svelte-kit sync && node ./scripts/generate-openapi.mjs",
+    "dev": "npm run openapigen && vite dev --host 0.0.0.0",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed --project=chromium",
     "fmt": "prettier . --write",
+    "openapigen": "svelte-kit sync && node ./scripts/generate-openapi.mjs",
+    "prepare": "svelte-kit sync || echo ''",
+    "preview": "npm run openapigen && vite preview",
+    "screenshot": "playwright test e2e/home.spec.ts --grep \"@screenshot\"",
     "test": "vitest run"
   },
   "dependencies": {
@@ -28,6 +31,7 @@
     "zod-validation-error": "3.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.54.2",
     "@sveltejs/adapter-node": "5.2.12",
     "@sveltejs/adapter-static": "3.0.8",
     "@sveltejs/kit": "2.17.1",
