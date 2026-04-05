@@ -2,6 +2,7 @@ import {
   createStreamingAudioPlayer,
   type StreamingAudioPlayer,
 } from "$lib/client/utils";
+import { generateVoice, generateVoiceStream } from "$lib/shared/kokoro";
 import type { ProfileData } from "./store.svelte";
 import umami from "$lib/client/umami";
 
@@ -14,6 +15,7 @@ export interface GenerationHandle {
 
 let activeAbortController: AbortController | null = null;
 let activePlayer: StreamingAudioPlayer | null = null;
+let activeObjectUrl: string | null = null;
 
 function stopActiveGeneration() {
   activeAbortController?.abort();
@@ -21,12 +23,17 @@ function stopActiveGeneration() {
 
   activePlayer?.dispose();
   activePlayer = null;
+
+  if (activeObjectUrl) {
+    URL.revokeObjectURL(activeObjectUrl);
+    activeObjectUrl = null;
+  }
 }
 
 /**
  * Generate runs the text to speech generation process.
  *
- * Note: streaming MVP only supports API mode right now.
+ * Runs in browser mode only.
  */
 export async function generate(profile: ProfileData): Promise<GenerationHandle> {
   stopActiveGeneration();
@@ -39,59 +46,71 @@ export async function generate(profile: ProfileData): Promise<GenerationHandle> 
     speed: profile.speed,
     format: profile.format,
     acceleration: profile.acceleration,
-    executionPlace: profile.executionPlace,
+    generationMode: profile.generationMode,
   });
-
-  if (profile.executionPlace === "browser") {
-    throw new Error(
-      "Streaming playback MVP currently only supports API execution mode. Please switch Execution Place to API.",
-    );
-  }
 
   const abortController = new AbortController();
   activeAbortController = abortController;
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  if (profile.generationMode === "normal") {
+    const result = await generateVoice({
+      text: profile.text,
+      lang: profile.lang,
+      voiceFormula: profile.voiceFormula,
+      model: profile.model,
+      speed: profile.speed,
+      format: profile.format,
+      acceleration: profile.acceleration,
+    });
 
-  if (profile.apiKey.trim()) {
-    headers.Authorization = `Bearer ${profile.apiKey.trim()}`;
+    const blob = new Blob([result.buffer], { type: result.mimeType });
+    const audioUrl = URL.createObjectURL(blob);
+    activeObjectUrl = audioUrl;
+
+    return {
+      audioUrl,
+      done: Promise.resolve(),
+      abort: () => {
+        abortController.abort();
+      },
+      dispose: () => {
+        if (activeObjectUrl === audioUrl) {
+          URL.revokeObjectURL(audioUrl);
+          activeObjectUrl = null;
+        }
+        if (activeAbortController === abortController) {
+          activeAbortController = null;
+        }
+      },
+    };
   }
 
-  const response = await fetch(
-    `${profile.apiBaseUrl.replace(/\/$/, "")}/audio/speech`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        input: profile.text,
-        voice: profile.voiceFormula,
-        model: profile.model,
-        speed: profile.speed,
-        response_format: "mp3",
-      }),
-      signal: abortController.signal,
+  const chunkStream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for await (const chunk of generateVoiceStream({
+          text: profile.text,
+          lang: profile.lang,
+          voiceFormula: profile.voiceFormula,
+          model: profile.model,
+          speed: profile.speed,
+          acceleration: profile.acceleration,
+        })) {
+          if (abortController.signal.aborted) {
+            break;
+          }
+          controller.enqueue(chunk);
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
     },
-  );
-
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => null);
-    const message =
-      errorBody?.message ?? `Generation failed with status ${response.status}`;
-    throw new Error(message);
-  }
-
-  if (!response.body) {
-    throw new Error("Streaming response body is unavailable in this browser.");
-  }
-
-  const responseMimeType =
-    response.headers.get("content-type")?.split(";")[0]?.trim() || "audio/mpeg";
+  });
 
   const player = createStreamingAudioPlayer({
-    reader: response.body.getReader(),
-    mimeType: responseMimeType,
+    reader: chunkStream.getReader(),
+    mimeType: "audio/wav",
     signal: abortController.signal,
   });
 
