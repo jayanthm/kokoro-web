@@ -19,6 +19,7 @@ import { authenticate } from "$lib/server/authenticate";
  *     summary: Generate audio from the input text
  *     description: >
  *       This endpoint is compatible with the OpenAI API.
+ *       It is now optimized for streaming-first playback; use `wav` for the lowest latency.
  *
  *
  *       Python Example:
@@ -33,9 +34,10 @@ import { authenticate } from "$lib/server/authenticate";
  *
  *           speech_file_path = Path(__file__).parent / "speech.mp3"
  *           response = client.audio.speech.create(
- *               model="model_q8f16",
- *               voice="af_heart",
+ *               model="model_q8f16",  # optional/ignored (kept for OpenAI compatibility)
+ *               voice="af_heart",      # optional/ignored (fixed internally)
  *               input="Today is a wonderful day to build something people love!",
+ *               response_format="wav",
  *           )
  *
  *           response.stream_to_file(speech_file_path)
@@ -53,22 +55,20 @@ import { authenticate } from "$lib/server/authenticate";
  *           const speechFile = path.resolve("./speech.mp3");
  *
  *           const mp3 = await openai.audio.speech.create({
- *             model: "model_q8f16",
- *             voice: "af_heart",
+ *             model: "model_q8f16", // optional/ignored (kept for OpenAI compatibility)
+ *             voice: "af_heart", // optional/ignored (fixed internally)
  *             input: "Today is a wonderful day to build something people love!",
+ *             response_format: "wav",
  *           });
  *
  *           const buffer = Buffer.from(await mp3.arrayBuffer());
  *           await fs.promises.writeFile(speechFile, buffer);
  *
- *       Note about the **voice** (*voice formula*) field:
+ *       Model/voice behavior:
  *
- *           • This field is used to specify a synthesis formula.
- *           • It must follow the pattern: voice1*weight1 + voice2*weight2 + ... + voiceN*weightN.
- *           • Voice IDs must be one of those returned by the voices endpoint.
- *           • Each weight must be a number between 0 and 1, rounded to the nearest 0.1.
- *           • If a single voice is provided without an asterisk, it is assumed to have weight 1.
- *           • The language of the first voice in the formula is used for the phonemizer.
+ *           • Synthesis is currently fixed internally to model `model_q8f16` and voice `af_heart`.
+ *           • `model` and `voice` are accepted only for OpenAI-compatible clients and are ignored.
+ *           • For low-latency playback, prefer `response_format="wav"` and stream chunks as they arrive.
  *
  *     tags:
  *       - Speech
@@ -81,10 +81,14 @@ import { authenticate } from "$lib/server/authenticate";
  *             properties:
  *               model:
  *                 type: string
- *                 description: Model to use for the synthesis
+ *                 deprecated: true
+ *                 default: model_q8f16
+ *                 description: Deprecated. Ignored by this endpoint; synthesis uses fixed model `model_q8f16`.
  *               voice:
  *                 type: string
- *                 description: Voice formula to use for the synthesis
+ *                 deprecated: true
+ *                 default: af_heart
+ *                 description: Deprecated. Ignored by this endpoint; synthesis uses fixed voice `af_heart`.
  *               input:
  *                 type: string
  *                 description: Input text to synthesize
@@ -92,13 +96,21 @@ import { authenticate } from "$lib/server/authenticate";
  *                 type: string
  *                 enum: [mp3, wav]
  *                 default: mp3
- *                 description: Response format, either `mp3` or `wav`
+ *                 description: Response format, either `mp3` or `wav` (`wav` recommended for low-latency streaming)
  *               speed:
  *                 type: number
  *                 minimum: 0.25
  *                 maximum: 5
  *                 default: 1
  *                 description: Speed of the synthesis
+ *             required:
+ *               - input
+ *             example:
+ *               input: Today is a wonderful day to build something people love!
+ *               response_format: wav
+ *               speed: 1
+ *               model: model_q8f16
+ *               voice: af_heart
  *     responses:
  *       200:
  *         description: Audio file with the synthesized speech

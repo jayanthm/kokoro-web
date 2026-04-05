@@ -76,27 +76,38 @@ Then access the web UI at http://localhost:3000 and the API at http://localhost:
 
 ## 🔌 API Integration
 
-Kokoro Web provides an OpenAI-compatible API that works as a drop-in replacement for applications using OpenAI's text-to-speech service:
+Kokoro Web provides an OpenAI-compatible API with a streaming-first experience:
+
+- `model` and `voice` are still accepted for client compatibility, but synthesis is fixed internally (`model_q8f16` + `af_heart`)
+- prefer `response_format: "wav"` for low-latency playback
+- UX is now simpler: send text, start playback immediately, and optionally persist the final buffer
+
+### Streaming client example (JavaScript)
 
 ```javascript
-import fs from "fs";
-import path from "path";
 import OpenAI from "openai";
 
 const openai = new OpenAI({
-  baseURL: 'http://your-kokoro-host/api/v1',
-  apiKey: 'your-kokoro-api-key',
+  baseURL: "http://your-kokoro-host/api/v1",
+  apiKey: "your-kokoro-api-key",
 });
-const speechFile = path.resolve("./speech.mp3");
 
-const mp3 = await openai.audio.speech.create({
+const audioResponse = await openai.audio.speech.create({
+  input: "Today is a wonderful day to build something people love!",
+  response_format: "wav",
+
+  // Optional and currently ignored by server (kept for compatibility):
   model: "model_q8f16",
   voice: "af_heart",
-  input: "Today is a wonderful day to build something people love!",
 });
 
-const buffer = Buffer.from(await mp3.arrayBuffer());
-await fs.promises.writeFile(speechFile, buffer);
+// Simplified UX: begin playback as soon as bytes are available.
+// Browser example:
+const audioBlob = new Blob([await audioResponse.arrayBuffer()], {
+  type: "audio/wav",
+});
+const url = URL.createObjectURL(audioBlob);
+new Audio(url).play();
 ```
 
 ## 📜 License
