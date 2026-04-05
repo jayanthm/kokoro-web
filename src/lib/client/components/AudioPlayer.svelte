@@ -2,7 +2,7 @@
   import WaveSurfer from "wavesurfer.js";
   import Spectrogram from "wavesurfer.js/dist/plugins/spectrogram.esm.js";
   import Hover from "wavesurfer.js/dist/plugins/hover.esm.js";
-  import { Download, Pause, Play } from "lucide-svelte";
+  import { Download, Pause, Play, RotateCcw, RotateCw } from "lucide-svelte";
   import { fade } from "svelte/transition";
 
   interface Props {
@@ -19,6 +19,8 @@
   let totalDuration = $state("0:00");
   let currentTime = $state("0:00");
   let isReady = $state(false);
+  let totalDurationSeconds = $state(0);
+  let currentTimeSeconds = $state(0);
 
   // Re-render when the audio URL changes, but not when the last URL is the same
   let lastAudioUrl = $state("");
@@ -34,6 +36,8 @@
     isPlaying = false;
     totalDuration = "0:00";
     currentTime = "0:00";
+    totalDurationSeconds = 0;
+    currentTimeSeconds = 0;
     isReady = false;
 
     // Destroy the previous instance and reset elements
@@ -101,6 +105,7 @@
 
     waveSurfer.on("ready", (newTotalDuration) => {
       isReady = true;
+      totalDurationSeconds = newTotalDuration;
       totalDuration = secondsToMinutes(newTotalDuration);
       if (streamStatus === "streaming") {
         waveSurfer?.play();
@@ -108,6 +113,7 @@
     });
 
     waveSurfer.on("timeupdate", (newCurrentTime) => {
+      currentTimeSeconds = newCurrentTime;
       currentTime = secondsToMinutes(newCurrentTime);
     });
   }
@@ -128,19 +134,45 @@
       waveSurfer.play();
     }
   }
+
+  function seekBy(secondsDelta: number) {
+    if (!waveSurfer || !isReady) return;
+    const nextTime = Math.max(
+      0,
+      Math.min(waveSurfer.getCurrentTime() + secondsDelta, waveSurfer.getDuration()),
+    );
+    waveSurfer.setTime(nextTime);
+  }
+
+  function seekByPercent(event: Event) {
+    if (!waveSurfer || !isReady) return;
+    const target = event.currentTarget as HTMLInputElement;
+    const nextPercent = Number(target.value);
+    if (!Number.isFinite(nextPercent)) return;
+    waveSurfer.seekTo(nextPercent / 100);
+  }
 </script>
 
 <div
   class="bg-base-100 border-base-content/20 rounded-box overflow-hidden border"
 >
   <div class="p-2">
-    <div class="flex w-full items-center justify-between">
-      <div class="flex items-center justify-start space-x-2">
-        <button
-          class="btn btn-ghost btn-circle"
-          onclick={playOrPause}
-          disabled={!isReady}
-        >
+      <div class="flex w-full flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center justify-start gap-2">
+          <button
+            class="btn btn-ghost btn-circle"
+            onclick={() => seekBy(-10)}
+            disabled={!isReady}
+          >
+            <span class="tooltip tooltip-right" data-tip="Back 10s">
+              <RotateCcw class="size-5" />
+            </span>
+          </button>
+          <button
+            class="btn btn-ghost btn-circle"
+            onclick={playOrPause}
+            disabled={!isReady}
+          >
           {#if isPlaying}
             <span in:fade class="tooltip tooltip-right" data-tip="Pause">
               <Pause class="size-6" />
@@ -150,14 +182,25 @@
               <Play class="size-6" />
             </span>
           {/if}
-        </button>
-        <span>{currentTime} - {totalDuration}</span>
-        {#if streamStatus === "streaming"}
-          <span class="badge badge-info badge-soft">Streaming...</span>
-        {:else if !isReady}
-          <span class="badge badge-neutral badge-soft">Buffering...</span>
-        {/if}
-      </div>
+          </button>
+          <button
+            class="btn btn-ghost btn-circle"
+            onclick={() => seekBy(10)}
+            disabled={!isReady}
+          >
+            <span class="tooltip tooltip-right" data-tip="Forward 10s">
+              <RotateCw class="size-5" />
+            </span>
+          </button>
+          <span>{currentTime} - {totalDuration}</span>
+          {#if streamStatus === "streaming"}
+            <span class="badge badge-info badge-soft">Live streaming...</span>
+          {:else if !isReady}
+            <span class="badge badge-neutral badge-soft">Buffering...</span>
+          {:else if streamStatus === "finalized"}
+            <span class="badge badge-success badge-soft">Finalized</span>
+          {/if}
+        </div>
 
       <div class="flex items-center justify-end space-x-2">
         <a
@@ -175,6 +218,20 @@
     </div>
 
     <div bind:this={waveformContainer} class="flex-grow p-2"></div>
+    <div class="px-2 pb-2">
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="0.1"
+        class="range range-primary range-sm"
+        value={totalDurationSeconds > 0
+          ? Math.min((currentTimeSeconds / totalDurationSeconds) * 100, 100)
+          : 0}
+        oninput={seekByPercent}
+        disabled={!isReady}
+      />
+    </div>
   </div>
 
   {#if showSpectrogram}

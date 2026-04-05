@@ -17,6 +17,8 @@
   });
 
   let loading = $state(false);
+  let hasOutput = $state(false);
+  let generationPhase = $state<"idle" | "streaming" | "processing" | "finalized" | "error">("idle");
   let loadingFromUrl = $state(false);
   let sourceUrl = $state("");
   let sourceChapter = $state("");
@@ -73,6 +75,8 @@
     if (!profile.text) return;
 
     loading = true;
+    hasOutput = true;
+    generationPhase = profile.generationMode === "streaming" ? "streaming" : "processing";
     voiceUrl = "";
     try {
       generationHandle?.dispose();
@@ -80,13 +84,23 @@
       voiceUrl = generationHandle.audioUrl;
       await generationHandle.done;
       voiceUrl = generationHandle.audioUrl;
+      generationPhase = "finalized";
       toaster.success("Audio generated successfully");
     } catch (error) {
       console.error(error);
+      generationPhase = "error";
       toaster.error((error as any).message ?? "An error occurred, see console");
     } finally {
       loading = false;
     }
+  };
+
+  const stopGeneration = () => {
+    if (!loading) return;
+    generationHandle?.abort();
+    generationPhase = "idle";
+    loading = false;
+    toaster.success("Generation stopped");
   };
 </script>
 
@@ -174,16 +188,42 @@
       step="0.1"
     />
 
-    <GenerateButton {loading} onclick={() => process()} />
+    <div class="space-y-2">
+      <GenerateButton {loading} onclick={() => process()} />
+      {#if loading}
+        <button class="btn btn-outline btn-error w-full" onclick={stopGeneration}>
+          Stop generation
+        </button>
+      {/if}
+    </div>
   </div>
 
-  {#if loading || voiceUrl !== ""}
-    <div class="space-y-4 pt-2">
-      <h2 class="text-xl font-bold">Output</h2>
+  {#if hasOutput}
+    <div class="from-primary/5 via-secondary/5 to-accent/5 space-y-4 rounded-xl bg-gradient-to-r p-4 pt-2">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-xl font-bold">Playback Studio</h2>
+        {#if generationPhase === "streaming"}
+          <span class="badge badge-info badge-soft">Live stream in progress</span>
+        {:else if generationPhase === "processing"}
+          <span class="badge badge-warning badge-soft">Rendering audio…</span>
+        {:else if generationPhase === "finalized"}
+          <span class="badge badge-success badge-soft">Ready for replay + download</span>
+        {:else if generationPhase === "error"}
+          <span class="badge badge-error badge-soft">Generation failed</span>
+        {/if}
+      </div>
+      <p class="text-base-content/70 text-sm">
+        Pause, jump backward/forward, and scrub the timeline while generation is running.
+        Your final audio remains available when rendering completes.
+      </p>
       <AudioPlayer
         audioUrl={voiceUrl}
         showSpectrogram={true}
-        streamStatus={loading ? "streaming" : "finalized"}
+        streamStatus={generationPhase === "streaming"
+          ? "streaming"
+          : generationPhase === "finalized"
+            ? "finalized"
+            : "idle"}
       />
     </div>
   {/if}
