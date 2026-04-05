@@ -18,12 +18,56 @@
   });
 
   let loading = $state(false);
+  let loadingFromUrl = $state(false);
+  let sourceUrl = $state("");
+  let sourceChapter = $state("");
   let voiceUrl = $state("");
   let generationHandle: GenerationHandle | null = $state(null);
 
   onDestroy(() => {
     generationHandle?.dispose();
   });
+
+  const loadFromUrl = async () => {
+    if (loadingFromUrl) return;
+    if (!sourceUrl.trim()) {
+      toaster.error("Please provide a source URL");
+      return;
+    }
+
+    loadingFromUrl = true;
+    try {
+      const chapter = sourceChapter.trim();
+      const response = await fetch("/api/v1/text/extract", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(profile.apiKey
+            ? {
+                Authorization: `Bearer ${profile.apiKey}`,
+              }
+            : {}),
+        },
+        body: JSON.stringify({
+          url: sourceUrl.trim(),
+          ...(chapter ? { chapter: Number(chapter) } : {}),
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.message ?? "Failed to load text from URL");
+      }
+
+      profile.text = payload.text;
+      toaster.success(`Loaded text from URL${payload.title ? `: ${payload.title}` : ""}`);
+    } catch (error) {
+      console.error(error);
+      toaster.error((error as any).message ?? "Failed to load text from URL");
+    } finally {
+      loadingFromUrl = false;
+    }
+  };
 
   const process = async () => {
     if (loading) return;
@@ -70,7 +114,30 @@
         <option disabled>WebGPU (not supported by your browser)</option>
       {/if}
     </SelectControl>
+  </div>
 
+  <div class="space-y-2 rounded-md border border-base-300 p-3">
+    <h3 class="font-semibold">Load from URL</h3>
+    <div class="grid grid-cols-1 gap-2 md:grid-cols-[1fr_160px_auto]">
+      <input
+        class="input input-bordered w-full"
+        placeholder="https://example.com/chapter-123"
+        bind:value={sourceUrl}
+      />
+      <input
+        class="input input-bordered w-full"
+        placeholder="Chapter (optional)"
+        inputmode="numeric"
+        bind:value={sourceChapter}
+      />
+      <button
+        class="btn btn-outline"
+        onclick={() => loadFromUrl()}
+        disabled={loadingFromUrl}
+      >
+        {loadingFromUrl ? "Loading..." : "Load from URL"}
+      </button>
+    </div>
   </div>
 
   <TextareaControl
