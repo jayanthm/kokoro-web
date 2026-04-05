@@ -24,6 +24,7 @@
   let sourceChapter = $state("");
   let voiceUrl = $state("");
   let generationHandle: GenerationHandle | null = $state(null);
+  let generationRunId = $state(0);
 
   onDestroy(() => {
     generationHandle?.dispose();
@@ -74,32 +75,67 @@
     if (loading) return;
     if (!profile.text) return;
 
+    const runId = generationRunId + 1;
+    generationRunId = runId;
+
     loading = true;
     hasOutput = true;
     generationPhase = profile.generationMode === "streaming" ? "streaming" : "processing";
     voiceUrl = "";
+
     try {
       generationHandle?.dispose();
-      generationHandle = await generate(profile);
-      voiceUrl = generationHandle.audioUrl;
-      await generationHandle.done;
-      voiceUrl = generationHandle.audioUrl;
+      generationHandle = null;
+
+      const handle = await generate(profile);
+      if (runId !== generationRunId) {
+        handle.dispose();
+        return;
+      }
+
+      generationHandle = handle;
+      voiceUrl = handle.audioUrl;
+
+      await handle.done;
+      if (runId !== generationRunId) {
+        return;
+      }
+
+      voiceUrl = handle.audioUrl;
       generationPhase = "finalized";
       toaster.success("Audio generated successfully");
     } catch (error) {
+      if (runId !== generationRunId) {
+        return;
+      }
+
+      const message = (error as any)?.message ?? "An error occurred, see console";
+      const isAbort =
+        (error as any)?.name === "AbortError" ||
+        (typeof message === "string" && message.toLowerCase().includes("aborted"));
+
+      if (isAbort) {
+        generationPhase = voiceUrl ? "finalized" : "idle";
+        return;
+      }
+
       console.error(error);
       generationPhase = "error";
-      toaster.error((error as any).message ?? "An error occurred, see console");
+      toaster.error(message);
     } finally {
-      loading = false;
+      if (runId === generationRunId) {
+        loading = false;
+      }
     }
   };
 
   const stopGeneration = () => {
     if (!loading) return;
+
+    generationRunId += 1;
     generationHandle?.abort();
-    generationPhase = "idle";
     loading = false;
+    generationPhase = voiceUrl ? "finalized" : "idle";
     toaster.success("Generation stopped");
   };
 </script>
@@ -116,10 +152,6 @@
         <option value="streaming">Streaming (progressive playback)</option>
         <option value="normal">Normal (single final file)</option>
       </select>
-      <span class="fieldset-label">
-        Browser mode is always used. Choose streaming for chunked playback or
-        normal to wait for the final audio.
-      </span>
     </fieldset>
 
     <fieldset class="fieldset w-full">
@@ -199,26 +231,22 @@
   </div>
 
   {#if hasOutput}
-    <div class="from-primary/5 via-secondary/5 to-accent/5 space-y-4 rounded-xl bg-gradient-to-r p-4 pt-2">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="text-xl font-bold">Playback Studio</h2>
+    <div class="space-y-2 rounded-xl border border-base-300 bg-base-100 p-4">
+      <div class="flex items-center justify-between gap-2">
+        <h2 class="text-lg font-semibold">Player</h2>
         {#if generationPhase === "streaming"}
-          <span class="badge badge-info badge-soft">Live stream in progress</span>
+          <span class="badge badge-info badge-soft">Generating…</span>
         {:else if generationPhase === "processing"}
-          <span class="badge badge-warning badge-soft">Rendering audio…</span>
+          <span class="badge badge-warning badge-soft">Finishing…</span>
         {:else if generationPhase === "finalized"}
-          <span class="badge badge-success badge-soft">Ready for replay + download</span>
+          <span class="badge badge-success badge-soft">Done</span>
         {:else if generationPhase === "error"}
-          <span class="badge badge-error badge-soft">Generation failed</span>
+          <span class="badge badge-error badge-soft">Failed</span>
         {/if}
       </div>
-      <p class="text-base-content/70 text-sm">
-        Pause, jump backward/forward, and scrub the timeline while generation is running.
-        Your final audio remains available when rendering completes.
-      </p>
       <AudioPlayer
         audioUrl={voiceUrl}
-        showSpectrogram={true}
+        showSpectrogram={false}
         streamStatus={generationPhase === "streaming"
           ? "streaming"
           : generationPhase === "finalized"
