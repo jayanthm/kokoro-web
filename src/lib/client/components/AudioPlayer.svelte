@@ -136,7 +136,7 @@
         <button
           class="btn btn-ghost btn-circle"
           onclick={playOrPause}
-          disabled={!isReady || streamStatus === "streaming"}
+          disabled={!isReady}
         >
           {#if isPlaying}
             <span in:fade class="tooltip tooltip-right" data-tip="Pause">
@@ -170,6 +170,15 @@
         </a>
       </div>
     </div>
+
+    {#if audioUrl}
+      <audio
+        class="mt-2 w-full"
+        controls
+        preload="metadata"
+        src={audioUrl}
+      ></audio>
+    {/if}
 
     <div bind:this={waveformContainer} class="flex-grow p-2"></div>
   </div>
