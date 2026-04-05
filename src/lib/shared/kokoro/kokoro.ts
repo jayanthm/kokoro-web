@@ -12,6 +12,110 @@ import { parseVoiceFormula } from "./voiceFormula";
 const MODEL_CONTEXT_WINDOW = 512;
 const SAMPLE_RATE = 24000; // sample rate in Hz
 
+type GenerateVoiceParams = {
+  text: string;
+  lang: LangId | string;
+  voiceFormula: string;
+  model: ModelId | string;
+  speed: number;
+  format: "wav" | "mp3";
+  acceleration: "cpu" | "webgpu";
+};
+
+type VoiceGenerationContext = {
+  ort: Awaited<ReturnType<typeof getOnnxRuntime>>;
+  chunks: TextProcessorChunk[];
+  combinedVoice: Awaited<ReturnType<typeof combineVoices>>;
+  session: Awaited<
+    ReturnType<Awaited<ReturnType<typeof getOnnxRuntime>>["InferenceSession"]["create"]>
+  >;
+};
+
+function validateGenerateVoiceParams(params: GenerateVoiceParams): void {
+  if (params.acceleration === "webgpu" && !detectWebGPU()) {
+    throw new Error("WebGPU is not supported in this environment");
+  }
+  if (params.speed < 0.1 || params.speed > 5) {
+    throw new Error("Speed must be between 0.1 and 5");
+  }
+}
+
+async function createVoiceGenerationContext(
+  params: Pick<GenerateVoiceParams, "text" | "lang" | "voiceFormula" | "model" | "acceleration">,
+): Promise<VoiceGenerationContext> {
+  const ort = await getOnnxRuntime();
+  const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
+  const chunks: TextProcessorChunk[] = await preprocessText(
+    params.text,
+    params.lang,
+    tokensPerChunk,
+  );
+
+  const modelBuffer = await getModel(params.model);
+  const voices = parseVoiceFormula(params.voiceFormula);
+  const combinedVoice = await combineVoices(voices);
+
+  const session = await ort.InferenceSession.create(modelBuffer, {
+    executionProviders: [params.acceleration],
+  });
+
+  return { ort, chunks, combinedVoice, session };
+}
+
+async function* generateWaveformStream(
+  context: VoiceGenerationContext,
+): AsyncGenerator<Float32Array> {
+  const { ort, chunks, combinedVoice, session } = context;
+
+  // Process each chunk based on its type.
+  for (const chunk of chunks) {
+    if (chunk.type === "silence") {
+      const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
+      yield new Float32Array(silenceLength);
+      continue;
+    }
+
+    const tokensLength = chunk.tokens?.length ?? 0;
+    if (tokensLength < 1) {
+      console.log("Skipping chunk with no tokens");
+      continue;
+    }
+
+    const tokens = chunk.tokens;
+    const ref_s = combinedVoice[tokens.length - 1][0];
+    const paddedTokens = [0, ...tokens, 0];
+    const input_ids = new ort.Tensor("int64", paddedTokens, [1, paddedTokens.length]);
+    const style = new ort.Tensor("float32", ref_s, [1, ref_s.length]);
+    // Fixed speed because speed should be implemented as post-processing
+    // instead of being a model input to get better results.
+    const speed = new ort.Tensor("float32", [1], [1]);
+
+    // Get the raw waveform and trim extra silence duration.
+    const result = await session.run({ input_ids, style, speed });
+    const waveform = trimWaveform((await result.waveform.getData()) as Float32Array);
+    yield waveform;
+  }
+}
+
+/**
+ * Streams voice chunks from input text as per-chunk WAV buffers.
+ */
+export async function* generateVoiceStream(
+  params: Omit<GenerateVoiceParams, "format">,
+): AsyncGenerator<Uint8Array> {
+  validateGenerateVoiceParams({ ...params, format: "wav" });
+  const context = await createVoiceGenerationContext(params);
+
+  for await (const waveform of generateWaveformStream(context)) {
+    let wavBuffer = await createWavBuffer(waveform, SAMPLE_RATE);
+    if (params.speed !== 1) {
+      wavBuffer = await modifyWavSpeed(wavBuffer, params.speed);
+    }
+
+    yield new Uint8Array(wavBuffer);
+  }
+}
+
 /**
  * Generates a voice from a given text.
  *
@@ -31,82 +135,18 @@ const SAMPLE_RATE = 24000; // sample rate in Hz
  * @param params.acceleration - "cpu" or "webgpu" to select acceleration.
  * @returns Concatenated waveform.
  */
-export async function generateVoice(params: {
-  text: string;
-  lang: LangId | string;
-  voiceFormula: string;
-  model: ModelId | string;
-  speed: number;
-  format: "wav" | "mp3";
-  acceleration: "cpu" | "webgpu";
-}): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
-  if (params.acceleration === "webgpu" && !detectWebGPU()) {
-    throw new Error("WebGPU is not supported in this environment");
-  }
-  if (params.speed < 0.1 || params.speed > 5) {
-    throw new Error("Speed must be between 0.1 and 5");
-  }
-
-  const ort = await getOnnxRuntime();
-
-  const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
-  const chunks: TextProcessorChunk[] = await preprocessText(
-    params.text,
-    params.lang,
-    tokensPerChunk,
-  );
-
-  const modelBuffer = await getModel(params.model);
-  const voices = parseVoiceFormula(params.voiceFormula);
-  const combinedVoice = await combineVoices(voices);
-
-  const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: [params.acceleration],
-  });
+export async function generateVoice(
+  params: GenerateVoiceParams,
+): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
+  validateGenerateVoiceParams(params);
+  const context = await createVoiceGenerationContext(params);
 
   const waveforms: Float32Array[] = [];
   let waveformsLen = 0;
 
-  // Process each chunk based on its type.
-  for (const chunk of chunks) {
-    if (chunk.type === "silence") {
-      console.log(chunk);
-
-      const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
-      const silenceWave = new Float32Array(silenceLength);
-      waveforms.push(silenceWave);
-      waveformsLen += silenceLength;
-    }
-
-    if (chunk.type === "text") {
-      const tokensLength = chunk.tokens?.length ?? 0;
-      if (tokensLength < 1) {
-        console.log("Skipping chunk with no tokens");
-        continue;
-      }
-
-      console.log({ type: chunk.type, content: chunk.content });
-
-      const tokens = chunk.tokens;
-      const ref_s = combinedVoice[tokens.length - 1][0];
-      const paddedTokens = [0, ...tokens, 0];
-      const input_ids = new ort.Tensor("int64", paddedTokens, [
-        1,
-        paddedTokens.length,
-      ]);
-      const style = new ort.Tensor("float32", ref_s, [1, ref_s.length]);
-      // Fixed speed because speed should be implemented as post-processing
-      // instead of being a model input to get better results.
-      const speed = new ort.Tensor("float32", [1], [1]);
-
-      // Get the raw waveform and trim extra silence duration.
-      const result = await session.run({ input_ids, style, speed });
-      let waveform = (await result.waveform.getData()) as Float32Array;
-      waveform = trimWaveform(waveform);
-
-      waveforms.push(waveform);
-      waveformsLen += waveform.length;
-    }
+  for await (const waveform of generateWaveformStream(context)) {
+    waveforms.push(waveform);
+    waveformsLen += waveform.length;
   }
 
   if (waveforms.length === 0) {

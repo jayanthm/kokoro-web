@@ -2,15 +2,12 @@ import { json } from "@sveltejs/kit";
 import zod from "zod";
 import { fromError } from "zod-validation-error";
 import type { RequestHandler } from "./$types";
-import { generateVoice, parseVoiceFormula } from "$lib/shared/kokoro";
-import {
-  voicesIds,
-  modelsIds,
-  voicesMap,
-  type VoiceId,
-  type ModelId,
-} from "$lib/shared/resources";
+import { generateVoice, generateVoiceStream } from "$lib/shared/kokoro";
+import { voicesMap } from "$lib/shared/resources";
 import { authenticate } from "$lib/server/authenticate";
+
+const PINNED_VOICE_FORMULA = "af_heart";
+const PINNED_MODEL = "model";
 
 /**
  * @openapi
@@ -31,11 +28,12 @@ import { authenticate } from "$lib/server/authenticate";
  *               api_key="no-key",
  *           )
  *
- *           speech_file_path = Path(__file__).parent / "speech.mp3"
+ *           speech_file_path = Path(__file__).parent / "speech.wav"
  *           response = client.audio.speech.create(
- *               model="model_q8f16",
+ *               model="model",
  *               voice="af_heart",
  *               input="Today is a wonderful day to build something people love!",
+ *               response_format="wav",
  *           )
  *
  *           response.stream_to_file(speech_file_path)
@@ -50,25 +48,23 @@ import { authenticate } from "$lib/server/authenticate";
  *             baseURL: "http://localhost:5173/api/v1",
  *             apiKey: "no-key",
  *           });
- *           const speechFile = path.resolve("./speech.mp3");
+ *           const speechFile = path.resolve("./speech.wav");
  *
- *           const mp3 = await openai.audio.speech.create({
- *             model: "model_q8f16",
+ *           const wav = await openai.audio.speech.create({
+ *             model: "model",
  *             voice: "af_heart",
  *             input: "Today is a wonderful day to build something people love!",
+ *             response_format: "wav",
  *           });
  *
- *           const buffer = Buffer.from(await mp3.arrayBuffer());
+ *           const buffer = Buffer.from(await wav.arrayBuffer());
  *           await fs.promises.writeFile(speechFile, buffer);
  *
- *       Note about the **voice** (*voice formula*) field:
+ *       Notes:
  *
- *           • This field is used to specify a synthesis formula.
- *           • It must follow the pattern: voice1*weight1 + voice2*weight2 + ... + voiceN*weightN.
- *           • Voice IDs must be one of those returned by the voices endpoint.
- *           • Each weight must be a number between 0 and 1, rounded to the nearest 0.1.
- *           • If a single voice is provided without an asterisk, it is assumed to have weight 1.
- *           • The language of the first voice in the formula is used for the phonemizer.
+ *           • Synthesis is pinned server-side to voice "af_heart" and model "model".
+ *           • `response_format=wav` is streamed for low-latency playback.
+ *           • `response_format=mp3` remains buffered (non-streaming).
  *
  *     tags:
  *       - Speech
@@ -81,18 +77,18 @@ import { authenticate } from "$lib/server/authenticate";
  *             properties:
  *               model:
  *                 type: string
- *                 description: Model to use for the synthesis
+ *                 description: Ignored. Synthesis uses server-pinned model `model`.
  *               voice:
  *                 type: string
- *                 description: Voice formula to use for the synthesis
+ *                 description: Ignored. Synthesis uses server-pinned voice `af_heart`.
  *               input:
  *                 type: string
  *                 description: Input text to synthesize
  *               response_format:
  *                 type: string
  *                 enum: [mp3, wav]
- *                 default: mp3
- *                 description: Response format, either `mp3` or `wav`
+ *                 default: wav
+ *                 description: Response format. WAV responses are streamed; MP3 is buffered.
  *               speed:
  *                 type: number
  *                 minimum: 0.25
@@ -117,26 +113,10 @@ import { authenticate } from "$lib/server/authenticate";
  */
 
 const schema = zod.object({
-  model: zod.string().refine((val) => modelsIds.includes(val as ModelId), {
-    message: `Model not found, use one of: ${modelsIds.join(", ")}`,
-  }),
-  voice: zod.string().refine(
-    (val) => {
-      try {
-        const parsedVoices = parseVoiceFormula(val);
-        return parsedVoices.every(({ voiceId }) =>
-          voicesIds.includes(voiceId as VoiceId),
-        );
-      } catch (e) {
-        return false;
-      }
-    },
-    {
-      message: `Invalid voice formula. Voice IDs must be one of: ${voicesIds.join(", ")} and follow the pattern voice*weight.`,
-    },
-  ),
+  model: zod.string().optional(),
+  voice: zod.string().optional(),
   input: zod.string(),
-  response_format: zod.enum(["mp3", "wav"]).default("mp3").optional(),
+  response_format: zod.enum(["mp3", "wav"]).default("wav").optional(),
   speed: zod.number().min(0.25).max(5).default(1).optional(),
 });
 
@@ -156,22 +136,47 @@ export const POST: RequestHandler = async ({ request }) => {
     );
   }
 
-  const { model, input, voice, speed, response_format } = parsed.data;
+  const { input, speed, response_format } = parsed.data;
 
-  // Find the language of the first voice of the formula
-  const voices = parseVoiceFormula(voice);
-  const firstVoiceId = voices[0].voiceId as VoiceId;
-  const voiceFound = voicesMap[firstVoiceId] ?? voicesMap["af_alloy"];
-  const lang = voiceFound.lang;
+  const lang = voicesMap["af_heart"].lang;
 
   try {
+    if ((response_format ?? "wav") === "wav") {
+      const readable = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          try {
+            for await (const chunk of generateVoiceStream({
+              text: input,
+              lang: lang.id,
+              voiceFormula: PINNED_VOICE_FORMULA,
+              model: PINNED_MODEL,
+              speed: speed ?? 1,
+              acceleration: "cpu",
+            })) {
+              controller.enqueue(chunk);
+            }
+            controller.close();
+          } catch (e) {
+            controller.error(e);
+          }
+        },
+      });
+
+      return new Response(readable, {
+        headers: {
+          "Content-Type": "audio/wav",
+          "Transfer-Encoding": "chunked",
+        },
+      });
+    }
+
     const result = await generateVoice({
       text: input,
       lang: lang.id,
-      voiceFormula: voice,
-      model: model,
+      voiceFormula: PINNED_VOICE_FORMULA,
+      model: PINNED_MODEL,
       speed: speed ?? 1,
-      format: response_format ?? "mp3",
+      format: "mp3",
       acceleration: "cpu",
     });
 
