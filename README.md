@@ -88,6 +88,29 @@ A development-focused `Dockerfile` and helper script are included so you can ite
 
 You can customize the local dev port with `PORT`, for example: `PORT=4173 ./scripts/dev-test-deploy.sh dev`.
 
+### Option 4: Remote Codex Setup
+
+Use this when you want a fully reproducible containerized dev environment in VS Code/Codex.
+
+```bash
+# 1) Open the repo in VS Code (or Codex) and reopen in container
+code .
+# Command Palette -> "Dev Containers: Reopen in Container"
+
+# 2) Inside the container, run the bootstrap helper
+./scripts/bootstrap-codex.sh
+
+# 3) Start development
+npm run dev
+```
+
+What this setup provides:
+
+- `.devcontainer/devcontainer.json` using `docker/Dockerfile.dev`
+- Forwarded ports: `5173` (dev server) and `3000` (production/API preview)
+- Automatic dependency install on container creation with `postCreateCommand: npm ci`
+- Useful editor defaults/extensions for Svelte + TypeScript + Prettier + Tailwind
+
 ## ⚙️ Environment variables
 
 - **KW_SECRET_API_KEY** - Your API key for authentication. If left blank, authentication will not be activated
