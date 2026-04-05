@@ -84,6 +84,12 @@ A development-focused `Dockerfile` and helper script are included so you can ite
 
 # Build and run production image on http://localhost:3000
 ./scripts/dev-test-deploy.sh deploy-run
+
+# Run Playwright e2e tests in the official Playwright image
+./scripts/dev-test-deploy.sh dev &
+docker build -f docker/Dockerfile.e2e -t kokoro-web-e2e .
+docker run --rm --network host kokoro-web-e2e
+
 ```
 
 You can customize the local dev port with `PORT`, for example: `PORT=4173 ./scripts/dev-test-deploy.sh dev`.

@@ -1,0 +1,13 @@
+FROM mcr.microsoft.com/playwright:v1.54.2-jammy
+
+WORKDIR /app
+
+ENV CI=1
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+
+# Starts the app and runs Playwright tests using playwright.config.ts
+CMD ["npm", "run", "e2e"]
