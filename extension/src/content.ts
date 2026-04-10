@@ -1,4 +1,4 @@
-import type { ContentToBackground, BackgroundToContent, PopupToContent } from "./types";
+import type { BackgroundToContent, PopupToContent } from "./types";
 
 type PopupState = "idle" | "loading" | "playing";
 
@@ -15,14 +15,11 @@ let selectionTimeout: ReturnType<typeof setTimeout> | null = null;
 function createPopup(): void {
   shadowHost = document.createElement("div");
   shadowHost.id = "kokoro-tts-host";
-  // Minimal styles — no `all: initial` since shadow DOM already isolates styles.
-  // Zero size so it doesn't block page interaction; popup inside uses its own position:fixed.
   shadowHost.style.cssText =
     "position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none; overflow: visible;";
 
   const shadow = shadowHost.attachShadow({ mode: "open" });
 
-  // Scoped styles inside shadow DOM — isolated from host page CSS
   const style = document.createElement("style");
   style.textContent = `
     #kokoro-tts-popup {
@@ -57,25 +54,11 @@ function createPopup(): void {
       white-space: nowrap;
       transition: background 0.1s;
     }
-    #kokoro-play-btn:hover {
-      background: rgba(255,255,255,0.06);
-    }
-    #kokoro-play-btn:disabled {
-      opacity: 0.55;
-      cursor: default;
-    }
-    #kokoro-play-btn:disabled:hover {
-      background: none;
-    }
-    .kokoro-icon {
-      font-size: 11px;
-      line-height: 1;
-    }
-    .kokoro-divider {
-      width: 1px;
-      background: #45475a;
-      align-self: stretch;
-    }
+    #kokoro-play-btn:hover { background: rgba(255,255,255,0.06); }
+    #kokoro-play-btn:disabled { opacity: 0.55; cursor: default; }
+    #kokoro-play-btn:disabled:hover { background: none; }
+    .kokoro-icon { font-size: 11px; line-height: 1; }
+    .kokoro-divider { width: 1px; background: #45475a; align-self: stretch; }
     #kokoro-stop-btn {
       background: none;
       border: none;
@@ -88,12 +71,8 @@ function createPopup(): void {
       padding: 7px 10px;
       transition: background 0.1s;
     }
-    #kokoro-stop-btn:hover {
-      background: rgba(243,139,168,0.12);
-    }
-    #kokoro-stop-btn[hidden] {
-      display: none;
-    }
+    #kokoro-stop-btn:hover { background: rgba(243,139,168,0.12); }
+    #kokoro-stop-btn[hidden] { display: none; }
   `;
   shadow.appendChild(style);
 
@@ -177,7 +156,6 @@ function showPopup(rect: DOMRect): void {
   if (!shadowHost) createPopup();
   if (!popup) return;
 
-  // Position above the selection, horizontally centered
   const POPUP_WIDTH = 150;
   const POPUP_HEIGHT = 34;
   const MARGIN = 8;
@@ -185,31 +163,28 @@ function showPopup(rect: DOMRect): void {
   let top = rect.top - POPUP_HEIGHT - MARGIN;
   let left = rect.left + rect.width / 2 - POPUP_WIDTH / 2;
 
-  // Clamp to viewport edges
   if (top < MARGIN) top = rect.bottom + MARGIN;
   left = Math.max(MARGIN, Math.min(left, window.innerWidth - POPUP_WIDTH - MARGIN));
 
-  // Apply to shadow host (which is position:fixed with 0,0 origin)
-  if (shadowHost) {
-    shadowHost.style.top = "0";
-    shadowHost.style.left = "0";
-  }
   popup.style.top = `${top}px`;
   popup.style.left = `${left}px`;
   popup.style.display = "flex";
 
-  setState("idle");
+  // Only reset to idle if we're not already loading/playing
+  if (state === "idle") setState("idle");
 }
 
 function hidePopup(): void {
   if (popup) popup.style.display = "none";
-  setState("idle");
+  // Only reset state if we're idle — don't cancel loading/playing
+  if (state === "idle") setState("idle");
 }
 
 // ── Button handlers ───────────────────────────────────────────────────────────
 
 function onPlayClick(e: Event): void {
   e.stopPropagation();
+  e.preventDefault();
   if (state !== "idle") return;
 
   const text = window.getSelection()?.toString().trim() ?? "";
@@ -223,14 +198,27 @@ function onPlayClick(e: Event): void {
 
 function onStopClick(e: Event): void {
   e.stopPropagation();
+  e.preventDefault();
   chrome.runtime.sendMessage({ target: "background", type: "TTS_STOP" });
   setState("idle");
 }
 
 // ── Selection detection ───────────────────────────────────────────────────────
 
-// Capture phase: catches mouseup before pages can stopPropagation() it
-document.addEventListener("mouseup", () => {
+function isClickInsidePopup(e: Event): boolean {
+  if (!shadowHost) return false;
+  // composedPath() crosses shadow DOM boundaries — e.target doesn't
+  const path = e.composedPath();
+  return path.some((el) => el === shadowHost || el === popup);
+}
+
+// Capture phase so we catch mouseup even on pages that stopPropagation()
+document.addEventListener("mouseup", (e) => {
+  // Don't re-detect selection while loading or playing — the popup is already showing
+  if (state !== "idle") return;
+  // Don't re-detect if the mouseup was on our popup (e.g. clicking the play button)
+  if (isClickInsidePopup(e)) return;
+
   if (selectionTimeout) clearTimeout(selectionTimeout);
   selectionTimeout = setTimeout(() => {
     const text = window.getSelection()?.toString().trim() ?? "";
@@ -240,37 +228,31 @@ document.addEventListener("mouseup", () => {
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
       showPopup(rect);
-    } else if (state === "idle") {
+    } else {
       hidePopup();
     }
   }, 50);
-}, true); // capture phase
+}, true);
 
 document.addEventListener("mousedown", (e) => {
   if (!popup || popup.style.display === "none") return;
-  // Hide popup when clicking outside of it (and not currently playing/loading)
-  const shadow = getPopupShadow();
-  const target = e.target as Node;
-  const isInsideShadow = shadow?.contains(target) ?? false;
-  const isInsideHost = shadowHost?.contains(target) ?? false;
+  // Never hide while loading or playing
+  if (state !== "idle") return;
+  // Don't hide if clicking inside the popup
+  if (isClickInsidePopup(e)) return;
 
-  if (!isInsideShadow && !isInsideHost && state === "idle") {
-    hidePopup();
-  }
+  hidePopup();
 });
 
 // ── Incoming messages from background / popup ─────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg: BackgroundToContent | PopupToContent, _sender, sendResponse) => {
   switch (msg.type) {
-    // From popup: reply with current selection text
     case "GET_SELECTION":
       sendResponse({ text: window.getSelection()?.toString().trim() ?? "" });
       return true;
 
-    // From popup: play selected text (same flow as clicking the inline play button)
     case "TTS_SPEAK": {
-      // Only handle if this is from the popup (via tabs.sendMessage), not a broadcast
       if ((msg as any).target === "offscreen" || (msg as any).target === "background") break;
       const text = (msg as PopupToContent & { type: "TTS_SPEAK" }).text.slice(0, 2000);
       setState("loading");
@@ -278,16 +260,18 @@ chrome.runtime.onMessage.addListener((msg: BackgroundToContent | PopupToContent,
       break;
     }
 
-    // From popup: stop playback
     case "TTS_STOP":
       if ((msg as any).target === "offscreen" || (msg as any).target === "background") break;
       chrome.runtime.sendMessage({ target: "background", type: "TTS_STOP" });
       setState("idle");
       break;
 
-    // From background: playback state updates
+    case "TTS_GENERATING" as any:
+      setState("loading");
+      break;
     case "TTS_STARTED":
       setState("playing");
+      if (popup) popup.style.display = "flex"; // ensure visible
       break;
     case "TTS_DONE":
       setState("idle");

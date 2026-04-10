@@ -74,7 +74,7 @@ function setDownloadNeeded() {
   downloadStatus.className = "download-status";
   downloadBtn.style.display = "block";
   downloadBtn.disabled = false;
-  downloadBtn.textContent = "Download model (~87 MB)";
+  downloadBtn.textContent = "Download model (~327 MB)";
   progressBar.style.display = "none";
   playBtn.disabled = true;
 }
@@ -173,6 +173,9 @@ stopBtn.addEventListener("click", () => {
 chrome.runtime.onMessage.addListener((msg: any) => {
   // Playback state updates
   switch (msg.type) {
+    case "TTS_GENERATING":
+      setState("loading", "Generating speech…");
+      break;
     case "TTS_STARTED":
       setState("playing", "Playing…");
       break;
@@ -211,5 +214,16 @@ chrome.runtime.onMessage.addListener((msg: any) => {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 loadSelection();
+
 // Check if model is already downloaded
 chrome.runtime.sendMessage({ target: "background", type: "CHECK_CACHE" });
+
+// Restore TTS state (survives popup close/reopen)
+chrome.runtime.sendMessage(
+  { target: "background", type: "GET_TTS_STATE" },
+  (resp: { state?: string } | undefined) => {
+    if (!resp) return;
+    if (resp.state === "generating") setState("loading", "Generating speech…");
+    else if (resp.state === "playing") setState("playing", "Playing…");
+  },
+);

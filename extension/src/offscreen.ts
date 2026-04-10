@@ -1,26 +1,33 @@
 // Offscreen document: runs TTS generation and audio playback.
-// Has full browser API access (WASM, AudioContext, Cache API, fetch).
-// $lib/* aliases are resolved by Vite to the shared source + stubs.
-import { generateVoice } from "$lib/shared/kokoro/kokoro";
-import type { BackgroundToOffscreen, OffscreenToBackground } from "./types";
+// Uses streaming with pre-buffering for gapless playback despite single-threaded ONNX.
+import { generateVoiceStream } from "$lib/shared/kokoro/kokoro";
+import type { OffscreenToBackground } from "./types";
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
-const MODEL_ID = "model_q8f16"; // smallest model: 86 MB
+const MODEL_ID = "model"; // fp32 — best quality (326 MB)
 const VOICE_ID = "af_heart";
 const DOWNLOAD_BASE =
   "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231";
 const MODEL_URL = `${DOWNLOAD_BASE}/onnx/${MODEL_ID}.onnx`;
 const VOICE_URL = `${DOWNLOAD_BASE}/voices/${VOICE_ID}.bin`;
 const CACHE_NAME = "kokoro-web-resources";
+const SAMPLE_RATE = 24000;
 
-const DEFAULT_PARAMS = {
+// How many chunks to buffer before starting playback.
+// Single-threaded ONNX is ~2-4x slower, so we need a larger buffer to prevent gaps.
+const PREBUFFER_CHUNKS = 3;
+
+// Detect WebGPU at load time — offscreen docs have access to navigator.gpu
+const hasWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
+console.log("[Kokoro TTS] WebGPU available:", hasWebGPU);
+
+const STREAM_PARAMS = {
   lang: "en-us" as const,
   voiceFormula: VOICE_ID,
   model: MODEL_ID,
   speed: 1 as const,
-  format: "wav" as const,
-  acceleration: "cpu" as const,
+  acceleration: (hasWebGPU ? "webgpu" : "cpu") as "cpu" | "webgpu",
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -28,103 +35,165 @@ const DEFAULT_PARAMS = {
 type TtsState = "idle" | "generating" | "playing";
 
 let ttsState: TtsState = "idle";
-let currentAudio: HTMLAudioElement | null = null;
-let currentObjectUrl: string | null = null;
-// Track whether we're intentionally stopping (to ignore the error event)
-let intentionallyStopping = false;
+let audioCtx: AudioContext | null = null;
+let activeSourceNodes: AudioBufferSourceNode[] = [];
+let abortGeneration = false;
 
-// ── Core functions ────────────────────────────────────────────────────────────
+// ── WAV PCM extraction ────────────────────────────────────────────────────────
+
+/** Extract raw Float32 PCM samples from a WAV buffer (skips headers). */
+function extractPCM(wav: Uint8Array): Float32Array {
+  const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+  // Find the "data" sub-chunk
+  let offset = 12; // skip RIFF header (12 bytes)
+  while (offset + 8 < wav.byteLength) {
+    const id = String.fromCharCode(wav[offset], wav[offset + 1], wav[offset + 2], wav[offset + 3]);
+    const size = view.getUint32(offset + 4, true);
+    if (id === "data") {
+      return new Float32Array(wav.buffer, wav.byteOffset + offset + 8, size / 4);
+    }
+    offset += 8 + size;
+  }
+  return new Float32Array(0);
+}
+
+// ── Core: streaming TTS with pre-buffering ────────────────────────────────────
 
 async function speak(text: string, requestId: string): Promise<void> {
   stopPlayback();
   ttsState = "generating";
+  abortGeneration = false;
+
+  send({ type: "TTS_GENERATING" as any, requestId } as any);
+  console.log("[Kokoro TTS] Starting streaming generation for:", text.slice(0, 80));
 
   try {
-    console.log("[Kokoro TTS] Generating voice for:", text.slice(0, 50) + "...");
-    const result = await generateVoice({ text, ...DEFAULT_PARAMS });
+    audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
 
-    // Aborted while generating
-    if (ttsState !== "generating") {
-      console.log("[Kokoro TTS] Generation aborted (state changed)");
+    // Phase 1: Pre-buffer chunks before starting playback
+    const prebuffer: Float32Array[] = [];
+    const generator = generateVoiceStream({ text, ...STREAM_PARAMS });
+    let generatorDone = false;
+
+    // Collect PREBUFFER_CHUNKS chunks (or all if text is short)
+    for (let i = 0; i < PREBUFFER_CHUNKS; i++) {
+      if (abortGeneration) return cleanup_idle();
+      const { done, value } = await generator.next();
+      if (done) { generatorDone = true; break; }
+      const pcm = extractPCM(value);
+      if (pcm.length > 0) prebuffer.push(pcm);
+      console.log(`[Kokoro TTS] Pre-buffered chunk ${i + 1}: ${pcm.length} samples`);
+    }
+
+    if (abortGeneration) return cleanup_idle();
+    if (prebuffer.length === 0) {
+      ttsState = "idle";
+      send({ type: "TTS_ERROR", requestId, error: "No audio generated" });
       return;
     }
 
-    console.log("[Kokoro TTS] Generated audio buffer:", result.buffer.byteLength, "bytes, type:", result.mimeType);
+    // Phase 2: Schedule all pre-buffered chunks (gapless since they're queued at once)
+    let nextStartTime = audioCtx.currentTime + 0.05; // tiny lead-in
 
-    const blob = new Blob([result.buffer], { type: result.mimeType });
-    currentObjectUrl = URL.createObjectURL(blob);
-    console.log("[Kokoro TTS] Created blob URL:", currentObjectUrl);
+    for (const pcm of prebuffer) {
+      nextStartTime = scheduleChunk(pcm, nextStartTime);
+    }
 
-    const audio = new Audio(currentObjectUrl);
-    currentAudio = audio;
+    // Start playing!
+    ttsState = "playing";
+    console.log("[Kokoro TTS] Playback started with", prebuffer.length, "pre-buffered chunks");
+    send({ type: "TTS_STARTED", requestId });
 
-    audio.addEventListener("ended", () => {
-      console.log("[Kokoro TTS] Playback ended naturally");
-      cleanup();
+    // Phase 3: Stream remaining chunks — schedule each as it arrives
+    if (!generatorDone) {
+      for await (const chunk of { [Symbol.asyncIterator]: () => generator }) {
+        if (abortGeneration) break;
+        const pcm = extractPCM(chunk);
+        if (pcm.length > 0) {
+          nextStartTime = scheduleChunk(pcm, nextStartTime);
+        }
+      }
+    }
+
+    if (abortGeneration) return cleanup_idle();
+
+    // Phase 4: Wait for all scheduled audio to finish playing
+    const remaining = nextStartTime - audioCtx.currentTime;
+    if (remaining > 0) {
+      console.log(`[Kokoro TTS] Waiting ${remaining.toFixed(1)}s for playback to finish`);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, remaining * 1000 + 200);
+        const check = setInterval(() => {
+          if (abortGeneration) {
+            clearTimeout(timer);
+            clearInterval(check);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+
+    if (!abortGeneration) {
+      console.log("[Kokoro TTS] Playback complete");
       ttsState = "idle";
       send({ type: "TTS_DONE", requestId });
-    });
-
-    audio.addEventListener("error", (e) => {
-      // Ignore errors caused by intentional stop (setting src = "")
-      if (intentionallyStopping) {
-        console.log("[Kokoro TTS] Ignoring error during intentional stop");
-        return;
-      }
-      const mediaError = audio.error;
-      console.error("[Kokoro TTS] Audio error:", mediaError?.code, mediaError?.message, e);
-      cleanup();
-      ttsState = "idle";
-      send({ type: "TTS_ERROR", requestId, error: `Audio playback error (code: ${mediaError?.code})` });
-    });
-
-    // Wait for the audio to be ready before playing
-    await new Promise<void>((resolve, reject) => {
-      audio.addEventListener("canplaythrough", () => resolve(), { once: true });
-      audio.addEventListener("error", () => reject(new Error("Audio load failed")), { once: true });
-      audio.load();
-    });
-
-    console.log("[Kokoro TTS] Audio loaded, duration:", audio.duration, "seconds");
-
-    await audio.play();
-    ttsState = "playing";
-    console.log("[Kokoro TTS] Playback started");
-    send({ type: "TTS_STARTED", requestId });
+    }
   } catch (err) {
-    console.error("[Kokoro TTS] Generation/playback error:", err);
+    console.error("[Kokoro TTS] Error:", err);
     ttsState = "idle";
     send({
       type: "TTS_ERROR",
       requestId,
-      error: err instanceof Error ? err.message : "Unknown TTS error",
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 }
 
-function stopPlayback(): void {
-  if (currentAudio) {
-    intentionallyStopping = true;
-    currentAudio.pause();
-    currentAudio.removeAttribute("src");
-    currentAudio.load(); // Reset the audio element
-    currentAudio = null;
-    // Reset the flag after a tick so any queued error events are ignored
-    setTimeout(() => { intentionallyStopping = false; }, 0);
-  }
-  cleanup();
+/** Schedule a PCM chunk for playback. Returns the time when this chunk ends. */
+function scheduleChunk(pcm: Float32Array, startAt: number): number {
+  if (!audioCtx) return startAt;
+
+  const buffer = audioCtx.createBuffer(1, pcm.length, SAMPLE_RATE);
+  buffer.getChannelData(0).set(pcm);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+
+  // Schedule at the exact end of the previous chunk — no gaps
+  const t = Math.max(audioCtx.currentTime, startAt);
+  source.start(t);
+  activeSourceNodes.push(source);
+
+  source.addEventListener("ended", () => {
+    const idx = activeSourceNodes.indexOf(source);
+    if (idx >= 0) activeSourceNodes.splice(idx, 1);
+  });
+
+  return t + buffer.duration;
+}
+
+function cleanup_idle(): void {
   ttsState = "idle";
 }
 
-function cleanup(): void {
-  if (currentObjectUrl) {
-    URL.revokeObjectURL(currentObjectUrl);
-    currentObjectUrl = null;
+function stopPlayback(): void {
+  abortGeneration = true;
+
+  for (const source of activeSourceNodes) {
+    try { source.stop(); } catch { /* already stopped */ }
   }
+  activeSourceNodes = [];
+
+  if (audioCtx) {
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+  }
+
+  ttsState = "idle";
 }
 
 function send(msg: OffscreenToBackground): void {
-  // Tag messages so the background knows they're from us (not a re-broadcast)
   chrome.runtime.sendMessage({ ...msg, target: "background" });
 }
 
@@ -153,7 +222,6 @@ async function downloadWithProgress(
 
   const total = parseInt(res.headers.get("content-length") || "0", 10);
   if (!res.body || total === 0) {
-    // Fallback: no streaming progress
     const buf = await res.arrayBuffer();
     onProgress(buf.byteLength, buf.byteLength, label);
     return buf;
@@ -171,7 +239,6 @@ async function downloadWithProgress(
     onProgress(downloaded, total, label);
   }
 
-  // Combine chunks
   const result = new Uint8Array(downloaded);
   let offset = 0;
   for (const chunk of chunks) {
@@ -185,8 +252,7 @@ async function preloadFiles(): Promise<void> {
   const { modelCached, voiceCached } = await checkCached();
 
   if (modelCached && voiceCached) {
-    console.log("[Kokoro TTS] All files already cached");
-    send({ type: "PRELOAD_DONE", requestId: "" } as any);
+    chrome.runtime.sendMessage({ target: "background", type: "PRELOAD_DONE" });
     return;
   }
 
@@ -204,22 +270,17 @@ async function preloadFiles(): Promise<void> {
     const cache = await caches.open(CACHE_NAME);
 
     if (!voiceCached) {
-      console.log("[Kokoro TTS] Downloading voice file...");
       const voiceBuf = await downloadWithProgress(VOICE_URL, "Voice", sendProgress);
       await cache.put(VOICE_URL, new Response(voiceBuf));
-      console.log("[Kokoro TTS] Voice file cached");
     }
 
     if (!modelCached) {
-      console.log("[Kokoro TTS] Downloading model...");
       const modelBuf = await downloadWithProgress(MODEL_URL, "Model", sendProgress);
       await cache.put(MODEL_URL, new Response(modelBuf));
-      console.log("[Kokoro TTS] Model cached");
     }
 
     chrome.runtime.sendMessage({ target: "background", type: "PRELOAD_DONE" });
   } catch (err) {
-    console.error("[Kokoro TTS] Preload error:", err);
     chrome.runtime.sendMessage({
       target: "background",
       type: "PRELOAD_ERROR",
@@ -231,22 +292,17 @@ async function preloadFiles(): Promise<void> {
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg: any) => {
-  // Only process messages targeted at us
   if (msg.target !== "offscreen") return;
 
+  console.log("[Kokoro TTS] Offscreen received:", msg.type);
+
   if (msg.type === "TTS_SPEAK") {
-    console.log("[Kokoro TTS] Received TTS_SPEAK:", msg.text?.slice(0, 50));
     void speak(msg.text, msg.requestId);
   } else if (msg.type === "TTS_STOP") {
-    console.log("[Kokoro TTS] Received TTS_STOP");
     stopPlayback();
   } else if (msg.type === "CHECK_CACHE") {
     checkCached().then((status) => {
-      chrome.runtime.sendMessage({
-        target: "background",
-        type: "CACHE_STATUS",
-        ...status,
-      });
+      chrome.runtime.sendMessage({ target: "background", type: "CACHE_STATUS", ...status });
     });
   } else if (msg.type === "PRELOAD") {
     void preloadFiles();

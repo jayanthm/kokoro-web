@@ -1,9 +1,10 @@
-import type {
-  BackgroundToContent,
-} from "./types";
+import type { BackgroundToContent } from "./types";
 
 const OFFSCREEN_URL = chrome.runtime.getURL("offscreen.html");
 
+// ── TTS state tracking (survives popup open/close) ───────────────────────────
+
+let ttsState: "idle" | "generating" | "playing" = "idle";
 let pendingTabId: number | null = null;
 
 // ── Offscreen document lifecycle ─────────────────────────────────────────────
@@ -28,43 +29,36 @@ async function ensureOffscreenDocument(): Promise<void> {
     justification: "Generate and play TTS audio using Kokoro ONNX model in-browser",
   });
 
-  // Give the offscreen document time to load its script
   await new Promise<void>((resolve) => setTimeout(resolve, 500));
 }
 
 // ── Message routing ───────────────────────────────────────────────────────────
-//
-// All messages use a `target` field to prevent re-processing:
-//   content → background:   target = "background"
-//   background → offscreen: target = "offscreen"
-//   offscreen → background: target = "background"
-//   background → content:   via chrome.tabs.sendMessage (no target needed)
-//
 
 chrome.runtime.onMessage.addListener(
-  (
-    msg: any,
-    sender: chrome.runtime.MessageSender,
-    _sendResponse: (response?: unknown) => void,
-  ) => {
+  (msg: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => {
     // Ignore messages not targeted at us
-    if (msg.target && msg.target !== "background") return;
+    if (msg.target && msg.target !== "background") return false;
 
-    console.log("[Kokoro BG] Received:", msg.type, "from:", sender.url?.slice(0, 60) || sender.tab?.url?.slice(0, 60) || "unknown");
+    console.log("[Kokoro BG] Received:", msg.type, "from:", sender.url?.slice(0, 50) || sender.tab?.url?.slice(0, 50) || "popup");
 
-    // ── TTS_SPEAK — from content script (has sender.tab) or popup (no sender.tab) ──
+    // ── GET_TTS_STATE — popup queries current state on open ──
+    if (msg.type === "GET_TTS_STATE") {
+      sendResponse({ state: ttsState, tabId: pendingTabId });
+      return false; // synchronous response
+    }
+
+    // ── TTS_SPEAK — from content script or popup ──
     if (msg.type === "TTS_SPEAK") {
-      const resolveTab: Promise<number | null> = sender.tab?.id
+      const tabPromise: Promise<number | null> = sender.tab?.id
         ? Promise.resolve(sender.tab.id)
         : chrome.tabs.query({ active: true, currentWindow: true }).then(([t]) => t?.id ?? null);
 
-      resolveTab.then((tabId) => {
+      tabPromise.then((tabId) => {
         pendingTabId = tabId;
         console.log("[Kokoro BG] Starting TTS for tab:", pendingTabId);
         return ensureOffscreenDocument();
       })
         .then(() => {
-          console.log("[Kokoro BG] Offscreen ready, forwarding TTS_SPEAK");
           chrome.runtime.sendMessage({
             target: "offscreen",
             type: "TTS_SPEAK",
@@ -73,63 +67,79 @@ chrome.runtime.onMessage.addListener(
           });
         })
         .catch((err) => {
-          console.error("[Kokoro BG] Failed to create offscreen document:", err);
+          console.error("[Kokoro BG] Failed:", err);
+          ttsState = "idle";
           if (pendingTabId !== null) {
             chrome.tabs.sendMessage(pendingTabId, {
               type: "TTS_ERROR",
               error: "Failed to initialize TTS engine",
-            } satisfies BackgroundToContent);
+            } satisfies BackgroundToContent).catch(() => {});
             pendingTabId = null;
           }
         });
 
-      return true; // async
+      return false; // no sendResponse needed
     }
 
-    // ── From popup: CHECK_CACHE / PRELOAD ──
+    // ── CHECK_CACHE / PRELOAD — from popup ──
     if (msg.type === "CHECK_CACHE" || msg.type === "PRELOAD") {
       ensureOffscreenDocument()
         .then(() => {
           chrome.runtime.sendMessage({ target: "offscreen", type: msg.type });
         })
         .catch((err) => {
-          console.error("[Kokoro BG] Failed to create offscreen for preload:", err);
+          console.error("[Kokoro BG] Offscreen error:", err);
         });
-      return true;
+      return false;
     }
 
     // ── TTS_STOP — from content script or popup ──
     if (msg.type === "TTS_STOP") {
-      console.log("[Kokoro BG] Stop requested");
+      ttsState = "idle";
       chrome.runtime.sendMessage({ target: "offscreen", type: "TTS_STOP" });
-      return;
+      return false;
     }
 
-    // ── From offscreen: preload progress (popup reads these directly via onMessage) ──
-    // No forwarding needed — popup has its own chrome.runtime.onMessage listener
-    if (msg.type === "CACHE_STATUS" || msg.type === "PRELOAD_PROGRESS" || msg.type === "PRELOAD_DONE" || msg.type === "PRELOAD_ERROR") {
-      // These are already broadcast; the popup picks them up directly
-      return;
+    // ── From offscreen: TTS_GENERATING ──
+    if (msg.type === "TTS_GENERATING") {
+      ttsState = "generating";
+      // Forward to the active tab's content script
+      if (pendingTabId !== null) {
+        chrome.tabs.sendMessage(pendingTabId, { type: "TTS_GENERATING" }).catch(() => {});
+      }
+      // Popup picks this up via broadcast (chrome.runtime.onMessage)
+      return false;
     }
 
-    // ── From offscreen: playback state updates ──
+    // ── From offscreen: TTS_STARTED / TTS_DONE / TTS_ERROR ──
     if (msg.type === "TTS_STARTED" || msg.type === "TTS_DONE" || msg.type === "TTS_ERROR") {
-      console.log("[Kokoro BG] Offscreen says:", msg.type, "forwarding to tab:", pendingTabId);
+      if (msg.type === "TTS_STARTED") ttsState = "playing";
+      if (msg.type === "TTS_DONE" || msg.type === "TTS_ERROR") ttsState = "idle";
+
+      console.log("[Kokoro BG] Offscreen says:", msg.type, "→ tab:", pendingTabId);
+
       if (pendingTabId !== null) {
         const forwardMsg: BackgroundToContent =
           msg.type === "TTS_ERROR"
             ? { type: "TTS_ERROR", error: msg.error }
             : { type: msg.type };
 
-        chrome.tabs.sendMessage(pendingTabId, forwardMsg).catch(() => {
-          // Tab may have been closed
-        });
+        chrome.tabs.sendMessage(pendingTabId, forwardMsg).catch(() => {});
 
         if (msg.type === "TTS_DONE" || msg.type === "TTS_ERROR") {
           pendingTabId = null;
         }
       }
+      // Popup also picks these up via broadcast
+      return false;
     }
+
+    // ── Preload progress (popup reads directly via broadcast) ──
+    if (msg.type === "CACHE_STATUS" || msg.type === "PRELOAD_PROGRESS" || msg.type === "PRELOAD_DONE" || msg.type === "PRELOAD_ERROR") {
+      return false;
+    }
+
+    return false;
   },
 );
 

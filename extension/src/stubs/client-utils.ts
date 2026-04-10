@@ -1,6 +1,6 @@
-// Stub for $lib/client/utils — forces CPU mode, no streaming player needed in extension
+// Stub for $lib/client/utils — detect real WebGPU in offscreen document
 export function detectWebGPU(): boolean {
-  return false;
+  return typeof navigator !== "undefined" && "gpu" in navigator;
 }
 
 // Stub out streamingAudioPlayer exports so any transitive imports don't break
