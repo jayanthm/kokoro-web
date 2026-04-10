@@ -1,6 +1,6 @@
 // Offscreen document: runs TTS generation and audio playback.
-// Uses streaming with pre-buffering for gapless playback despite single-threaded ONNX.
-import { generateVoiceStream } from "$lib/shared/kokoro/kokoro";
+// Uses cached streaming (ONNX session reused across calls) with pre-buffering.
+import { generateVoiceStreamCached, warmUp } from "./cached-tts";
 import type { OffscreenToBackground } from "./types";
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ async function speak(text: string, requestId: string): Promise<void> {
 
     // Phase 1: Pre-buffer chunks before starting playback
     const prebuffer: Float32Array[] = [];
-    const generator = generateVoiceStream({ text, ...STREAM_PARAMS });
+    const generator = generateVoiceStreamCached({ text, ...STREAM_PARAMS });
     let generatorDone = false;
 
     // Collect PREBUFFER_CHUNKS chunks (or all if text is short)
@@ -278,6 +278,20 @@ async function preloadFiles(): Promise<void> {
       const modelBuf = await downloadWithProgress(MODEL_URL, "Model", sendProgress);
       await cache.put(MODEL_URL, new Response(modelBuf));
     }
+
+    // Pre-create the ONNX session so the first TTS call is instant
+    chrome.runtime.sendMessage({
+      target: "background",
+      type: "PRELOAD_PROGRESS",
+      label: "Initializing",
+      downloaded: 0,
+      total: 1,
+    });
+    await warmUp({
+      model: MODEL_ID,
+      acceleration: STREAM_PARAMS.acceleration,
+      voiceFormula: VOICE_ID,
+    });
 
     chrome.runtime.sendMessage({ target: "background", type: "PRELOAD_DONE" });
   } catch (err) {
