@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="script-src 'self'; object-src 'self'"
+    />
+    <title>Kokoro TTS</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      body {
+        width: 300px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        font-size: 13px;
+        background: #1e1e2e;
+        color: #cdd6f4;
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 14px 10px;
+        border-bottom: 1px solid #313244;
+      }
+
+      .header-icon { font-size: 16px; }
+      .header-title { font-size: 14px; font-weight: 600; }
+
+      .body {
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      /* ── Model download section ── */
+      .download-section {
+        background: #181825;
+        border: 1px solid #313244;
+        border-radius: 6px;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .download-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .download-label {
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .download-status {
+        font-size: 11px;
+        color: #585b70;
+      }
+
+      .download-status.ready { color: #a6e3a1; }
+      .download-status.downloading { color: #fab387; }
+      .download-status.error { color: #f38ba8; }
+
+      .progress-bar {
+        width: 100%;
+        height: 6px;
+        background: #313244;
+        border-radius: 3px;
+        overflow: hidden;
+        display: none;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: #89b4fa;
+        border-radius: 3px;
+        transition: width 0.2s ease;
+        width: 0%;
+      }
+
+      .btn-download {
+        background: #45475a;
+        border: none;
+        border-radius: 5px;
+        color: #cdd6f4;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 10px;
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .btn-download:hover:not(:disabled) { background: #585b70; }
+      .btn-download:disabled { opacity: 0.45; cursor: default; }
+
+      /* ── Selection + controls section ── */
+      .selection-box {
+        background: #181825;
+        border: 1px solid #313244;
+        border-radius: 6px;
+        padding: 8px 10px;
+        min-height: 44px;
+        max-height: 80px;
+        overflow-y: auto;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #a6adc8;
+        word-break: break-word;
+      }
+
+      .selection-box.empty {
+        color: #585b70;
+        font-style: italic;
+      }
+
+      .actions { display: flex; gap: 6px; }
+
+      .btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 7px 10px;
+        border: none;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.1s, background 0.1s;
+      }
+
+      .btn:disabled { opacity: 0.45; cursor: default; }
+
+      .btn-play { background: #89b4fa; color: #1e1e2e; }
+      .btn-play:hover:not(:disabled) { background: #9dc5fb; }
+
+      .btn-stop { background: #f38ba8; color: #1e1e2e; display: none; }
+      .btn-stop:hover:not(:disabled) { background: #f5a0b8; }
+
+      .status {
+        font-size: 11px;
+        color: #585b70;
+        text-align: center;
+        min-height: 14px;
+      }
+
+      .status.loading { color: #fab387; }
+      .status.playing { color: #a6e3a1; }
+      .status.error   { color: #f38ba8; }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <span class="header-icon">🔊</span>
+      <span class="header-title">Kokoro TTS</span>
+    </div>
+    <div class="body">
+      <!-- Model download -->
+      <div class="download-section" id="download-section">
+        <div class="download-header">
+          <span class="download-label">TTS Model</span>
+          <span class="download-status" id="download-status">Checking…</span>
+        </div>
+        <div class="progress-bar" id="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <button class="btn-download" id="download-btn" disabled>Download model (~87 MB)</button>
+      </div>
+
+      <!-- Selection + play -->
+      <div id="selection-box" class="selection-box empty">No text selected</div>
+      <div class="actions">
+        <button id="play-btn" class="btn btn-play" disabled>▶ Read aloud</button>
+        <button id="stop-btn" class="btn btn-stop">■ Stop</button>
+      </div>
+      <div id="status" class="status"></div>
+    </div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
